@@ -1,5 +1,5 @@
 /*
- * Copyright 1999-2017 Alibaba Group.
+ * Copyright 1999-2018 Alibaba Group.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -57,6 +57,8 @@ public class SerializeConfig {
     private static boolean                                springfoxError  = false;
     private static boolean                                guavaError      = false;
     private static boolean                                jsonnullError   = false;
+
+    private static boolean                                jodaError       = false;
 
     private boolean                                       asm             = !ASMUtils.IS_ANDROID;
     private ASMSerializerFactory                          asmFactory;
@@ -123,12 +125,22 @@ public class SerializeConfig {
 	            asm = false;
 	        }
 
-            for (SerializerFeature feature : jsonType.serialzeFeatures()) {
-                if (SerializerFeature.WriteNonStringValueAsString == feature //
-                        || SerializerFeature.WriteEnumUsingToString == feature //
-                        || SerializerFeature.NotWriteDefaultValue == feature) {
+	        if (asm) {
+                for (SerializerFeature feature : jsonType.serialzeFeatures()) {
+                    if (SerializerFeature.WriteNonStringValueAsString == feature //
+                            || SerializerFeature.WriteEnumUsingToString == feature //
+                            || SerializerFeature.NotWriteDefaultValue == feature
+                            || SerializerFeature.BrowserCompatible == feature) {
+                        asm = false;
+                        break;
+                    }
+                }
+            }
+
+            if (asm) {
+                final Class<? extends SerializeFilter>[] filterClasses = jsonType.serialzeFilters();
+                if (filterClasses.length != 0) {
                     asm = false;
-                    break;
                 }
             }
         }
@@ -196,6 +208,7 @@ public class SerializeConfig {
                     if (SerializerFeature.WriteNonStringValueAsString == feature //
                             || SerializerFeature.WriteEnumUsingToString == feature //
                             || SerializerFeature.NotWriteDefaultValue == feature
+                            || SerializerFeature.BrowserCompatible == feature
                             || SerializerFeature.WriteClassName == feature) {
                         asm = false;
                         break;
@@ -203,7 +216,7 @@ public class SerializeConfig {
                 }
 
                 if (TypeUtils.isAnnotationPresentOneToMany(method) || TypeUtils.isAnnotationPresentManyToMany(method)) {
-    			    asm = true;
+    			    asm = false;
     			    break;
                 }
     		}
@@ -220,10 +233,14 @@ public class SerializeConfig {
 			} catch (ClassFormatError e) {
 			    // skip
 			} catch (ClassCastException e) {
-				// skip
+			    // skip
+            } catch (OutOfMemoryError e) {
+			    if (e.getMessage().indexOf("Metaspace") != -1) {
+			        throw e;
+                }
+                // skip
 			} catch (Throwable e) {
-				throw new JSONException("create asm serializer error, class "
-						+ clazz, e);
+				throw new JSONException("create asm serializer error, verson " + JSON.VERSION + ", class " + clazz, e);
 			}
 		}
 
@@ -269,61 +286,65 @@ public class SerializeConfig {
 		    asm = false;
 		}
 
-		put(Boolean.class, BooleanCodec.instance);
-		put(Character.class, CharacterCodec.instance);
-		put(Byte.class, IntegerCodec.instance);
-		put(Short.class, IntegerCodec.instance);
-		put(Integer.class, IntegerCodec.instance);
-		put(Long.class, LongCodec.instance);
-		put(Float.class, FloatCodec.instance);
-		put(Double.class, DoubleSerializer.instance);
-		put(BigDecimal.class, BigDecimalCodec.instance);
-		put(BigInteger.class, BigIntegerCodec.instance);
-		put(String.class, StringCodec.instance);
-		put(byte[].class, PrimitiveArraySerializer.instance);
-		put(short[].class, PrimitiveArraySerializer.instance);
-		put(int[].class, PrimitiveArraySerializer.instance);
-		put(long[].class, PrimitiveArraySerializer.instance);
-		put(float[].class, PrimitiveArraySerializer.instance);
-		put(double[].class, PrimitiveArraySerializer.instance);
-		put(boolean[].class, PrimitiveArraySerializer.instance);
-		put(char[].class, PrimitiveArraySerializer.instance);
-		put(Object[].class, ObjectArrayCodec.instance);
-		put(Class.class, MiscCodec.instance);
+        initSerializers();
+	}
 
-		put(SimpleDateFormat.class, MiscCodec.instance);
-		put(Currency.class, new MiscCodec());
-		put(TimeZone.class, MiscCodec.instance);
-		put(InetAddress.class, MiscCodec.instance);
-		put(Inet4Address.class, MiscCodec.instance);
-		put(Inet6Address.class, MiscCodec.instance);
-		put(InetSocketAddress.class, MiscCodec.instance);
-		put(File.class, MiscCodec.instance);
-		put(Appendable.class, AppendableSerializer.instance);
-		put(StringBuffer.class, AppendableSerializer.instance);
-		put(StringBuilder.class, AppendableSerializer.instance);
-		put(Charset.class, ToStringSerializer.instance);
-		put(Pattern.class, ToStringSerializer.instance);
-		put(Locale.class, ToStringSerializer.instance);
-		put(URI.class, ToStringSerializer.instance);
-		put(URL.class, ToStringSerializer.instance);
-		put(UUID.class, ToStringSerializer.instance);
+    private void initSerializers() {
+        put(Boolean.class, BooleanCodec.instance);
+        put(Character.class, CharacterCodec.instance);
+        put(Byte.class, IntegerCodec.instance);
+        put(Short.class, IntegerCodec.instance);
+        put(Integer.class, IntegerCodec.instance);
+        put(Long.class, LongCodec.instance);
+        put(Float.class, FloatCodec.instance);
+        put(Double.class, DoubleSerializer.instance);
+        put(BigDecimal.class, BigDecimalCodec.instance);
+        put(BigInteger.class, BigIntegerCodec.instance);
+        put(String.class, StringCodec.instance);
+        put(byte[].class, PrimitiveArraySerializer.instance);
+        put(short[].class, PrimitiveArraySerializer.instance);
+        put(int[].class, PrimitiveArraySerializer.instance);
+        put(long[].class, PrimitiveArraySerializer.instance);
+        put(float[].class, PrimitiveArraySerializer.instance);
+        put(double[].class, PrimitiveArraySerializer.instance);
+        put(boolean[].class, PrimitiveArraySerializer.instance);
+        put(char[].class, PrimitiveArraySerializer.instance);
+        put(Object[].class, ObjectArrayCodec.instance);
+        put(Class.class, MiscCodec.instance);
 
-		// atomic
-		put(AtomicBoolean.class, AtomicCodec.instance);
-		put(AtomicInteger.class, AtomicCodec.instance);
-		put(AtomicLong.class, AtomicCodec.instance);
-		put(AtomicReference.class, ReferenceCodec.instance);
-		put(AtomicIntegerArray.class, AtomicCodec.instance);
-		put(AtomicLongArray.class, AtomicCodec.instance);
-		
-		put(WeakReference.class, ReferenceCodec.instance);
-		put(SoftReference.class, ReferenceCodec.instance);
+        put(SimpleDateFormat.class, MiscCodec.instance);
+        put(Currency.class, new MiscCodec());
+        put(TimeZone.class, MiscCodec.instance);
+        put(InetAddress.class, MiscCodec.instance);
+        put(Inet4Address.class, MiscCodec.instance);
+        put(Inet6Address.class, MiscCodec.instance);
+        put(InetSocketAddress.class, MiscCodec.instance);
+        put(File.class, MiscCodec.instance);
+        put(Appendable.class, AppendableSerializer.instance);
+        put(StringBuffer.class, AppendableSerializer.instance);
+        put(StringBuilder.class, AppendableSerializer.instance);
+        put(Charset.class, ToStringSerializer.instance);
+        put(Pattern.class, ToStringSerializer.instance);
+        put(Locale.class, ToStringSerializer.instance);
+        put(URI.class, ToStringSerializer.instance);
+        put(URL.class, ToStringSerializer.instance);
+        put(UUID.class, ToStringSerializer.instance);
+
+        // atomic
+        put(AtomicBoolean.class, AtomicCodec.instance);
+        put(AtomicInteger.class, AtomicCodec.instance);
+        put(AtomicLong.class, AtomicCodec.instance);
+        put(AtomicReference.class, ReferenceCodec.instance);
+        put(AtomicIntegerArray.class, AtomicCodec.instance);
+        put(AtomicLongArray.class, AtomicCodec.instance);
+
+        put(WeakReference.class, ReferenceCodec.instance);
+        put(SoftReference.class, ReferenceCodec.instance);
 
         put(LinkedList.class, CollectionCodec.instance);
-	}
-	
-	/**
+    }
+
+    /**
 	 * add class level serialize filter
 	 * @since 1.2.10
 	 */
@@ -497,6 +518,8 @@ public class SerializeConfig {
                 put(clazz, writer = ToStringSerializer.instance);
             } else if (Iterator.class.isAssignableFrom(clazz)) {
                 put(clazz, writer = MiscCodec.instance);
+            } else if (org.w3c.dom.Node.class.isAssignableFrom(clazz)) {
+                put(clazz, writer = MiscCodec.instance);
             } else {
                 if (className.startsWith("java.awt.") //
                     && AwtCodec.support(clazz) //
@@ -648,8 +671,37 @@ public class SerializeConfig {
                     }
                 }
 
+                if ((!jodaError) && className.startsWith("org.joda.")) {
+                    try {
+                        String[] names = new String[] {
+                                "org.joda.time.LocalDate",
+                                "org.joda.time.LocalDateTime",
+                                "org.joda.time.LocalTime",
+                                "org.joda.time.Instant",
+                                "org.joda.time.DateTime",
+                                "org.joda.time.Period",
+                                "org.joda.time.Duration",
+                                "org.joda.time.DateTimeZone",
+                                "org.joda.time.UTCDateTimeZone",
+                                "org.joda.time.tz.CachedDateTimeZone",
+                                "org.joda.time.tz.FixedDateTimeZone",
+                        };
+
+                        for (String name : names) {
+                            if (name.equals(className)) {
+                                put(Class.forName(name), writer = JodaCodec.instance);
+                                return writer;
+                            }
+                        }
+                    } catch (ClassNotFoundException e) {
+                        // skip
+                        jodaError = true;
+                    }
+                }
+
                 Class[] interfaces = clazz.getInterfaces();
                 if (interfaces.length == 1 && interfaces[0].isAnnotation()) {
+                    put(clazz, AnnotationSerializer.instance);
                     return AnnotationSerializer.instance;
                 }
 
@@ -727,5 +779,10 @@ public class SerializeConfig {
      */
     public void setPropertyNamingStrategy(PropertyNamingStrategy propertyNamingStrategy) {
         this.propertyNamingStrategy = propertyNamingStrategy;
+    }
+
+    public void clearSerializers() {
+        this.serializers.clear();
+        this.initSerializers();
     }
 }

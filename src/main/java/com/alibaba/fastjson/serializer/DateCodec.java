@@ -1,5 +1,5 @@
 /*
- * Copyright 1999-2017 Alibaba Group.
+ * Copyright 1999-2018 Alibaba Group.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package com.alibaba.fastjson.serializer;
 
 import java.io.IOException;
 import java.lang.reflect.Type;
+import java.math.BigDecimal;
 import java.text.DateFormat;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -129,16 +130,27 @@ public class DateCodec extends AbstractDateDeserializer implements ObjectSeriali
             }
             
             out.write(buf);
-            
-            int timeZone = calendar.getTimeZone().getRawOffset()/(3600*1000);
+
+            int timeZone = calendar.getTimeZone().getOffset(calendar.getTimeInMillis()) / (3600 * 1000);
             if (timeZone == 0) {
                 out.write('Z');
             } else {
-                if (timeZone > 0) {
-                    out.append('+').append(String.format("%02d", timeZone));
-                } else {
-                    out.append('-').append(String.format("%02d", -timeZone));
+                if (timeZone > 9) {
+                    out.write('+');
+                    out.writeInt(timeZone);
+                } else if (timeZone > 0) {
+                    out.write('+');
+                    out.write('0');
+                    out.writeInt(timeZone);
+                } else if (timeZone < -9) {
+                    out.write('-');
+                    out.writeInt(timeZone);
+                } else if (timeZone < 0) {
+                    out.write('-');
+                    out.write('0');
+                    out.writeInt(-timeZone);
                 }
+
                 out.append(":00");
             }
 
@@ -157,6 +169,8 @@ public class DateCodec extends AbstractDateDeserializer implements ObjectSeriali
 
         if (val instanceof java.util.Date) {
             return (T) val;
+        } else if (val instanceof BigDecimal) {
+            return (T) new java.util.Date(TypeUtils.longValue((BigDecimal) val));
         } else if (val instanceof Number) {
             return (T) new java.util.Date(((Number) val).longValue());
         } else if (val instanceof String) {

@@ -1,6 +1,7 @@
 package com.alibaba.json.bvt.kotlin;
 
 import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.parser.Feature;
 import junit.framework.TestCase;
 import org.apache.commons.io.IOUtils;
 
@@ -18,7 +19,12 @@ public class Issue1483 extends TestCase {
 
         String json = "{\"age\":99,\"name\":\"robohorse\",\"desc\":\"xx\"}";
         Object obj = JSON.parseObject(json, clazz);
-        assertEquals("{\"age\":99,\"desc\":\"xx\",\"name\":\"robohorse\"}", JSON.toJSONString(obj));
+        assertSame(clazz, obj.getClass());
+//
+        for (int i = 0; i < 10; ++i) {
+            String text = JSON.parseObject(JSON.toJSONString(obj), Feature.OrderedField).toJSONString();
+            assertEquals("{\"age\":99,\"desc\":\"xx\",\"name\":\"robohorse\"}", text);
+        }
     }
 
     public static class ExtClassLoader extends ClassLoader {

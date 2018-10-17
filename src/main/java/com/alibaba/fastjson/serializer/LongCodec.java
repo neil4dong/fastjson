@@ -1,5 +1,5 @@
 /*
- * Copyright 1999-2017 Alibaba Group.
+ * Copyright 1999-2018 Alibaba Group.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package com.alibaba.fastjson.serializer;
 
 import java.io.IOException;
 import java.lang.reflect.Type;
+import java.math.BigDecimal;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -64,6 +65,10 @@ public class LongCodec implements ObjectSerializer, ObjectDeserializer {
                 long longValue = lexer.longValue();
                 lexer.nextToken(JSONToken.COMMA);
                 longObject = Long.valueOf(longValue);
+            } else if (token == JSONToken.LITERAL_FLOAT) {
+                BigDecimal number = lexer.decimalValue();
+                longObject = TypeUtils.longValue(number);
+                lexer.nextToken(JSONToken.COMMA);
             } else {
                 if (token == JSONToken.LBRACE) {
                     JSONObject jsonObject = new JSONObject(true);

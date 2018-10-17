@@ -4,20 +4,13 @@ import java.lang.reflect.Array;
 import java.lang.reflect.InvocationTargetException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.util.ArrayList;
-import java.util.Calendar;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.IdentityHashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import com.alibaba.fastjson.parser.ParserConfig;
+import com.alibaba.fastjson.parser.*;
 import com.alibaba.fastjson.parser.deserializer.FieldDeserializer;
 import com.alibaba.fastjson.parser.deserializer.JavaBeanDeserializer;
 import com.alibaba.fastjson.parser.deserializer.ObjectDeserializer;
@@ -83,6 +76,63 @@ public class JSONPath implements JSONAware {
         return currentObject;
     }
 
+    public Object extract(DefaultJSONParser parser) {
+        if (parser == null) {
+            return null;
+        }
+
+        init();
+
+        Context context = null;
+        for (int i = 0; i < segments.length; ++i) {
+            Segement segment = segments[i];
+            boolean last = i == segments.length - 1;
+
+            if (context != null && context.object != null) {
+                return segment.eval(this, null, context.object);
+            }
+
+            boolean eval;
+
+            if (!last) {
+                Segement nextSegment = segments[i + 1];
+                if (segment instanceof PropertySegement
+                        && ((PropertySegement) segment).deep
+                        && (nextSegment instanceof ArrayAccessSegement
+                            || nextSegment instanceof MultiIndexSegement
+                            || nextSegment instanceof MultiPropertySegement))
+                {
+                    eval = true;
+                } else if (nextSegment instanceof ArrayAccessSegement
+                        && ((ArrayAccessSegement) nextSegment).index < 0) {
+                    eval = true;
+                } else if (nextSegment instanceof FilterSegement) {
+                    eval = true;
+                } else {
+                    eval = false;
+                }
+            } else {
+                eval = true;
+            }
+
+            context = new Context(context, eval);
+            segment.extract(this, parser, context);
+        }
+
+        return context.object;
+    }
+
+    private static class Context {
+        final Context parent;
+        final boolean eval;
+        Object object;
+
+        public Context(Context parent, boolean eval) {
+            this.parent = parent;
+            this.eval = eval;
+        }
+    }
+
     public boolean contains(Object rootObject) {
         if (rootObject == null) {
             return false;
@@ -141,6 +191,27 @@ public class JSONPath implements JSONAware {
         }
 
         return evalSize(currentObject);
+    }
+
+    /**
+     * Extract keySet or field names from rootObject on this JSONPath.
+     * 
+     * @param rootObject Can be a map or custom object. Array and Collection are not supported.
+     * @return Set of keys, or <code>null</code> if not supported.
+     */
+    public Set<?> keySet(Object rootObject) {
+        if (rootObject == null) {
+            return null;
+        }
+
+        init();
+
+        Object currentObject = rootObject;
+        for (int i = 0; i < segments.length; ++i) {
+            currentObject = segments[i].eval(this, rootObject, currentObject);
+        }
+
+        return evalKeySet(currentObject);
     }
 
     @SuppressWarnings({ "rawtypes", "unchecked" })
@@ -368,6 +439,19 @@ public class JSONPath implements JSONAware {
         return jsonpath.evalSize(result);
     }
 
+    /**
+     * Compile jsonPath and use it to extract keySet or field names from rootObject.
+     * 
+     * @param rootObject Can be a map or custom object. Array and Collection are not supported.
+     * @param path JSONPath string to be compiled.
+     * @return Set of keys, or <code>null</code> if not supported.
+     */
+    public static Set<?> keySet(Object rootObject, String path) {
+        JSONPath jsonpath = compile(path);
+        Object result = jsonpath.eval(rootObject);
+        return jsonpath.evalKeySet(result);
+    }
+
     public static boolean contains(Object rootObject, String path) {
         if (rootObject == null) {
             return false;
@@ -412,7 +496,7 @@ public class JSONPath implements JSONAware {
         }
         return jsonpath;
     }
-    
+
     /**
      * @since 1.2.9
      * @param json
@@ -420,9 +504,29 @@ public class JSONPath implements JSONAware {
      * @return
      */
     public static Object read(String json, String path) {
-        Object object = JSON.parse(json);
-        JSONPath jsonpath = compile(path);
-        return jsonpath.eval(object);
+        return compile(path)
+                .eval(
+                        JSON.parse(json)
+                );
+    }
+
+    public static Object extract(String json, String path) {
+        return extract(json, path, ParserConfig.global, JSON.DEFAULT_PARSER_FEATURE);
+    }
+    
+    /**
+     * @since 1.2.51
+     * @param json
+     * @param path
+     * @return
+     */
+    public static Object extract(String json, String path, ParserConfig config, int features, Feature... optionFeatures) {
+        features |= Feature.OrderedField.mask;
+        DefaultJSONParser parser = new DefaultJSONParser(json, config, features);
+        JSONPath jsonPath = compile(path);
+        Object result = jsonPath.extract(parser);
+        parser.lexer.close();
+        return result;
     }
     
     public static Map<String, Object> paths(Object javaObject) {
@@ -431,37 +535,41 @@ public class JSONPath implements JSONAware {
     
     public static Map<String, Object> paths(Object javaObject, SerializeConfig config) {
         Map<Object, String> values = new IdentityHashMap<Object, String>();
-        paths(values, "/", javaObject, config);
-        
         Map<String, Object> paths = new HashMap<String, Object>();
-        for (Map.Entry<Object, String> entry : values.entrySet()) {
-            paths.put(entry.getValue(), entry.getKey());
-        }
+
+        paths(values, paths, "/", javaObject, config);
         return paths;
     }
 
-    @SuppressWarnings("rawtypes")
-    private static void paths(Map<Object, String> paths, String parent, Object javaObject, SerializeConfig config) {
+    private static void paths(Map<Object, String> values, Map<String, Object> paths, String parent, Object javaObject, SerializeConfig config) {
         if (javaObject == null) {
             return;
         }
-        
-        if (paths.containsKey(javaObject)) {
-            return;
+
+        String p = values.put(javaObject, parent);
+        if (p != null) {
+            boolean basicType =  javaObject instanceof String
+                    || javaObject instanceof Number
+                    || javaObject instanceof Date
+                    || javaObject instanceof UUID;
+
+            if (!basicType) {
+                return;
+            }
         }
-        
-        paths.put(javaObject, parent);
-        
+
+        paths.put(parent, javaObject);
+
         if (javaObject instanceof Map) {
             Map map = (Map) javaObject;
 
             for (Object entryObj : map.entrySet()) {
                 Map.Entry entry = (Map.Entry) entryObj;
                 Object key = entry.getKey();
-                
+
                 if (key instanceof String) {
                     String path = parent.equals("/") ?  "/" + key : parent + "/" + key;
-                    paths(paths, path, entry.getValue(), config);
+                    paths(values, paths, path, entry.getValue(), config);
                 }
             }
             return;
@@ -473,10 +581,10 @@ public class JSONPath implements JSONAware {
             int i = 0;
             for (Object item : collection) {
                 String path = parent.equals("/") ?  "/" + i : parent + "/" + i;
-                paths(paths, path, item, config);
+                paths(values, paths, path, item, config);
                 ++i;
             }
-            
+
             return;
         }
 
@@ -487,11 +595,11 @@ public class JSONPath implements JSONAware {
 
             for (int i = 0; i < len; ++i) {
                 Object item = Array.get(javaObject, i);
-                
+
                 String path = parent.equals("/") ?  "/" + i : parent + "/" + i;
-                paths(paths, path, item, config);
+                paths(values, paths, path, item, config);
             }
-            
+
             return;
         }
 
@@ -502,15 +610,15 @@ public class JSONPath implements JSONAware {
         ObjectSerializer serializer = config.getObjectWriter(clazz);
         if (serializer instanceof JavaBeanSerializer) {
             JavaBeanSerializer javaBeanSerializer = (JavaBeanSerializer) serializer;
-            
+
             try {
                 Map<String, Object> fieldValues = javaBeanSerializer.getFieldValuesMap(javaObject);
                 for (Map.Entry<String, Object> entry : fieldValues.entrySet()) {
                     String key = entry.getKey();
-                    
+
                     if (key instanceof String) {
                         String path = parent.equals("/") ?  "/" + key : parent + "/" + key;
-                        paths(paths, path, entry.getValue(), config);
+                        paths(values, paths, path, entry.getValue(), config);
                     }
                 }
             } catch (Exception e) {
@@ -518,7 +626,7 @@ public class JSONPath implements JSONAware {
             }
             return;
         }
-        
+
         return;
     }
 
@@ -540,6 +648,10 @@ public class JSONPath implements JSONAware {
 
         void next() {
             ch = path.charAt(pos++);
+        }
+
+        char getNextChar() {
+            return path.charAt(pos);
         }
 
         boolean isEOF() {
@@ -601,8 +713,10 @@ public class JSONPath implements JSONAware {
                                 next();
                             }
 
-                            if ("size".equals(propertyName)) {
+                            if ("size".equals(propertyName) || "length".equals(propertyName)) {
                                 return SizeSegement.instance;
+                            } else if ("keySet".equals(propertyName)) {
+                                return KeySetSegement.instance;
                             }
 
                             throw new JSONPathException("not support jsonpath : " + path);
@@ -642,6 +756,14 @@ public class JSONPath implements JSONAware {
         }
 
         Segement parseArrayAccess(boolean acceptBracket) {
+            Object object = parseArrayAccessFilter(acceptBracket);
+            if (object instanceof Segement) {
+                return ((Segement) object);
+            }
+            return new FilterSegement((Filter) object);
+        }
+
+        Object parseArrayAccessFilter(boolean acceptBracket) {
             if (acceptBracket) {
                 accept('[');
             }
@@ -659,23 +781,49 @@ public class JSONPath implements JSONAware {
                 predicateFlag = true;
             }
 
-            if (predicateFlag || IOUtils.firstIdentifier(ch)) {
+            if (predicateFlag || IOUtils.firstIdentifier(ch) || ch == '\\') {
                 String propertyName = readName();
 
                 skipWhitespace();
 
                 if (predicateFlag && ch == ')') {
                     next();
+
+                    Filter filter = new NotNullSegement(propertyName);
+                    while (ch == ' ') {
+                        next();
+                    }
+
+                    if (ch == '&' || ch == '|') {
+                        filter = filterRest(filter);
+                    }
+
                     if (acceptBracket) {
                         accept(']');
                     }
-
-                    return new FilterSegement(new NotNullSegement(propertyName));
+                    return filter;
                 }
 
                 if (acceptBracket && ch == ']') {
                     next();
-                    return new FilterSegement(new NotNullSegement(propertyName));
+                    Filter filter = new NotNullSegement(propertyName);
+                    while (ch == ' ') {
+                        next();
+                    }
+
+                    if (ch == '&' || ch == '|') {
+                        filter = filterRest(filter);
+                    }
+
+                    accept(')');
+                    if (predicateFlag) {
+                        accept(')');
+                    }
+
+                    if (acceptBracket) {
+                        accept(']');
+                    }
+                    return filter;
                 }
 
                 Operator op = readOp();
@@ -700,9 +848,11 @@ public class JSONPath implements JSONAware {
                     }
 
                     if (isInt(startValue.getClass()) && isInt(endValue.getClass())) {
-                        Filter filter = new IntBetweenSegement(propertyName, ((Number) startValue).longValue(),
-                                                               ((Number) endValue).longValue(), not);
-                        return new FilterSegement(filter);
+                        Filter filter = new IntBetweenSegement(propertyName
+                                , TypeUtils.longExtractValue((Number) startValue)
+                                , TypeUtils.longExtractValue((Number) endValue)
+                                , not);
+                        return filter;
                     }
 
                     throw new JSONPathException(path);
@@ -726,15 +876,6 @@ public class JSONPath implements JSONAware {
 
                             value = readValue();
                             valueList.add(value);
-                        }
-
-                        accept(')');
-                        if (predicateFlag) {
-                            accept(')');
-                        }
-
-                        if (acceptBracket) {
-                            accept(']');
                         }
                     }
 
@@ -762,26 +903,83 @@ public class JSONPath implements JSONAware {
                     }
 
                     if (valueList.size() == 1 && valueList.get(0) == null) {
+                        Filter filter;
                         if (not) {
-                            return new FilterSegement(new NotNullSegement(propertyName));
+                            filter = new NotNullSegement(propertyName);
                         } else {
-                            return new FilterSegement(new NullSegement(propertyName));
+                            filter = new NullSegement(propertyName);
                         }
+
+                        while (ch == ' ') {
+                            next();
+                        }
+
+                        if (ch == '&' || ch == '|') {
+                            filter = filterRest(filter);
+                        }
+
+                        accept(')');
+                        if (predicateFlag) {
+                            accept(')');
+                        }
+
+                        if (acceptBracket) {
+                            accept(']');
+                        }
+
+                        return filter;
                     }
 
                     if (isInt) {
                         if (valueList.size() == 1) {
-                            long value = ((Number) valueList.get(0)).longValue();
+                            long value = TypeUtils.longExtractValue((Number) valueList.get(0));
                             Operator intOp = not ? Operator.NE : Operator.EQ;
-                            return new FilterSegement(new IntOpSegement(propertyName, value, intOp));
+                            Filter filter = new IntOpSegement(propertyName, value, intOp);
+                            while (ch == ' ') {
+                                next();
+                            }
+
+                            if (ch == '&' || ch == '|') {
+                                filter = filterRest(filter);
+                            }
+
+                            accept(')');
+                            if (predicateFlag) {
+                                accept(')');
+                            }
+
+                            if (acceptBracket) {
+                                accept(']');
+                            }
+
+                            return filter;
                         }
 
                         long[] values = new long[valueList.size()];
                         for (int i = 0; i < values.length; ++i) {
-                            values[i] = ((Number) valueList.get(i)).longValue();
+                            values[i] = TypeUtils.longExtractValue((Number) valueList.get(i));
                         }
 
-                        return new FilterSegement(new IntInSegement(propertyName, values, not));
+                        Filter filter = new IntInSegement(propertyName, values, not);
+
+                        while (ch == ' ') {
+                            next();
+                        }
+
+                        if (ch == '&' || ch == '|') {
+                            filter = filterRest(filter);
+                        }
+
+                        accept(')');
+                        if (predicateFlag) {
+                            accept(')');
+                        }
+
+                        if (acceptBracket) {
+                            accept(']');
+                        }
+
+                        return filter;
                     }
 
                     if (isString) {
@@ -789,13 +987,51 @@ public class JSONPath implements JSONAware {
                             String value = (String) valueList.get(0);
 
                             Operator intOp = not ? Operator.NE : Operator.EQ;
-                            return new FilterSegement(new StringOpSegement(propertyName, value, intOp));
+                            Filter filter = new StringOpSegement(propertyName, value, intOp);
+
+                            while (ch == ' ') {
+                                next();
+                            }
+
+                            if (ch == '&' || ch == '|') {
+                                filter = filterRest(filter);
+                            }
+
+                            accept(')');
+                            if (predicateFlag) {
+                                accept(')');
+                            }
+
+                            if (acceptBracket) {
+                                accept(']');
+                            }
+
+                            return filter;
                         }
 
                         String[] values = new String[valueList.size()];
                         valueList.toArray(values);
 
-                        return new FilterSegement(new StringInSegement(propertyName, values, not));
+                        Filter filter = new StringInSegement(propertyName, values, not);
+
+                        while (ch == ' ') {
+                            next();
+                        }
+
+                        if (ch == '&' || ch == '|') {
+                            filter = filterRest(filter);
+                        }
+
+                        accept(')');
+                        if (predicateFlag) {
+                            accept(')');
+                        }
+
+                        if (acceptBracket) {
+                            accept(']');
+                        }
+
+                        return filter;
                     }
 
                     if (isIntObj) {
@@ -803,11 +1039,30 @@ public class JSONPath implements JSONAware {
                         for (int i = 0; i < values.length; ++i) {
                             Number item = (Number) valueList.get(i);
                             if (item != null) {
-                                values[i] = item.longValue();
+                                values[i] = TypeUtils.longExtractValue(item);
                             }
                         }
 
-                        return new FilterSegement(new IntObjInSegement(propertyName, values, not));
+                        Filter filter = new IntObjInSegement(propertyName, values, not);
+
+                        while (ch == ' ') {
+                            next();
+                        }
+
+                        if (ch == '&' || ch == '|') {
+                            filter = filterRest(filter);
+                        }
+
+                        accept(')');
+                        if (predicateFlag) {
+                            accept(')');
+                        }
+
+                        if (acceptBracket) {
+                            accept(']');
+                        }
+
+                        return filter;
                     }
 
                     throw new UnsupportedOperationException();
@@ -815,23 +1070,13 @@ public class JSONPath implements JSONAware {
 
                 if (ch == '\'' || ch == '"') {
                     String strValue = readString();
-                    if (predicateFlag) {
-                        accept(')');
-                    }
-                    
-                    if (acceptBracket) {
-                        accept(']');
-                    }
 
+                    Filter filter = null;
                     if (op == Operator.RLIKE) {
-                        return new FilterSegement(new RlikeSegement(propertyName, strValue, false));
-                    }
-
-                    if (op == Operator.NOT_RLIKE) {
-                        return new FilterSegement(new RlikeSegement(propertyName, strValue, true));
-                    }
-
-                    if (op == Operator.LIKE || op == Operator.NOT_LIKE) {
+                        filter = new RlikeSegement(propertyName, strValue, false);
+                    } else if (op == Operator.NOT_RLIKE) {
+                        filter = new RlikeSegement(propertyName, strValue, true);
+                    } else  if (op == Operator.LIKE || op == Operator.NOT_LIKE) {
                         while (strValue.indexOf("%%") != -1) {
                             strValue = strValue.replaceAll("%%", "%");
                         }
@@ -845,6 +1090,7 @@ public class JSONPath implements JSONAware {
                             } else {
                                 op = Operator.NE;
                             }
+                            filter = new StringOpSegement(propertyName, strValue, op);
                         } else {
                             String[] items = strValue.split("%");
 
@@ -863,7 +1109,11 @@ public class JSONPath implements JSONAware {
                                     }
                                 }
                             } else if (strValue.charAt(strValue.length() - 1) == '%') {
-                                containsValues = items;
+                                if (items.length == 1) {
+                                    startsWithValue = items[0];
+                                } else {
+                                    containsValues = items;
+                                }
                             } else {
                                 if (items.length == 1) {
                                     startsWithValue = items[0];
@@ -878,21 +1128,19 @@ public class JSONPath implements JSONAware {
                                 }
                             }
 
-                            return new FilterSegement(new MatchSegement(propertyName, startsWithValue, endsWithValue,
-                                                                        containsValues, not));
-
+                            filter = new MatchSegement(propertyName, startsWithValue, endsWithValue,
+                                    containsValues, not);
                         }
+                    } else {
+                        filter = new StringOpSegement(propertyName, strValue, op);
                     }
 
-                    return new FilterSegement(new StringOpSegement(propertyName, strValue, op));
-                }
+                    while (ch == ' ') {
+                        next();
+                    }
 
-                if (isDigitFirst(ch)) {
-                    long value = readLongValue();
-                    double doubleValue = 0D;
-                    if (ch == '.') {
-                        doubleValue = readDoubleValue(value);
-                        
+                    if (ch == '&' || ch == '|') {
+                        filter = filterRest(filter);
                     }
 
                     if (predicateFlag) {
@@ -903,27 +1151,75 @@ public class JSONPath implements JSONAware {
                         accept(']');
                     }
 
+                    return filter;
+                }
+
+                if (isDigitFirst(ch)) {
+                    long value = readLongValue();
+                    double doubleValue = 0D;
+                    if (ch == '.') {
+                        doubleValue = readDoubleValue(value);
+                        
+                    }
+
+                    Filter filter;
+
                     if (doubleValue == 0) {
-                        return new FilterSegement(new IntOpSegement(propertyName, value, op));
+                        filter = new IntOpSegement(propertyName, value, op);
                     } else {
-                        return new FilterSegement(new DoubleOpSegement(propertyName, doubleValue, op));    
+                        filter = new DoubleOpSegement(propertyName, doubleValue, op);
+                    }
+
+                    while (ch == ' ') {
+                        next();
+                    }
+
+                    if (ch == '&' || ch == '|') {
+                        filter = filterRest(filter);
+                    }
+
+                    if (predicateFlag) {
+                        accept(')');
+                    }
+
+                    if (acceptBracket) {
+                        accept(']');
+                    }
+
+                    if (doubleValue == 0) {
+                        return filter;
+                    } else {
+                        return filter;
                     }
                 }
 
                 if (ch == 'n') {
                     String name = readName();
                     if ("null".equals(name)) {
+                        Filter filter = null;
+                        if (op == Operator.EQ) {
+                            filter = new NullSegement(propertyName);
+                        } else if (op == Operator.NE) {
+                            filter = new NotNullSegement(propertyName);
+                        }
+
+                        if (filter != null) {
+                            while (ch == ' ') {
+                                next();
+                            }
+
+                            if (ch == '&' || ch == '|') {
+                                filter = filterRest(filter);
+                            }
+                        }
+
                         if (predicateFlag) {
                             accept(')');
                         }
                         accept(']');
 
-                        if (op == Operator.EQ) {
-                            return new FilterSegement(new NullSegement(propertyName));
-                        }
-
-                        if (op == Operator.NE) {
-                            return new FilterSegement(new NotNullSegement(propertyName));
+                        if (filter != null) {
+                            return filter;
                         }
 
                         throw new UnsupportedOperationException();
@@ -932,17 +1228,31 @@ public class JSONPath implements JSONAware {
                     String name = readName();
                     
                     if ("true".equals(name)) {
+                        Filter filter = null;
+
+                        if (op == Operator.EQ) {
+                            filter = new ValueSegment(propertyName, Boolean.TRUE, true);
+                        } else if (op == Operator.NE) {
+                            filter = new ValueSegment(propertyName, Boolean.TRUE, false);
+                        }
+
+                        if (filter != null) {
+                            while (ch == ' ') {
+                                next();
+                            }
+
+                            if (ch == '&' || ch == '|') {
+                                filter = filterRest(filter);
+                            }
+                        }
+
                         if (predicateFlag) {
                             accept(')');
                         }
                         accept(']');
 
-                        if (op == Operator.EQ) {
-                            return new FilterSegement(new ValueSegment(propertyName, Boolean.TRUE, true));
-                        }
-
-                        if (op == Operator.NE) {
-                            return new FilterSegement(new ValueSegment(propertyName, Boolean.TRUE, false));
+                        if (filter != null) {
+                            return filter;
                         }
 
                         throw new UnsupportedOperationException();
@@ -951,17 +1261,31 @@ public class JSONPath implements JSONAware {
                     String name = readName();
                     
                     if ("false".equals(name)) {
+                        Filter filter = null;
+
+                        if (op == Operator.EQ) {
+                            filter = new ValueSegment(propertyName, Boolean.FALSE, true);
+                        } else if (op == Operator.NE) {
+                            filter = new ValueSegment(propertyName, Boolean.FALSE, false);
+                        }
+
+                        if (filter != null) {
+                            while (ch == ' ') {
+                                next();
+                            }
+
+                            if (ch == '&' || ch == '|') {
+                                filter = filterRest(filter);
+                            }
+                        }
+
                         if (predicateFlag) {
                             accept(')');
                         }
                         accept(']');
 
-                        if (op == Operator.EQ) {
-                            return new FilterSegement(new ValueSegment(propertyName, Boolean.FALSE, true));
-                        }
-
-                        if (op == Operator.NE) {
-                            return new FilterSegement(new ValueSegment(propertyName, Boolean.FALSE, false));
+                        if (filter != null) {
+                            return filter;
                         }
 
                         throw new UnsupportedOperationException();
@@ -1001,6 +1325,13 @@ public class JSONPath implements JSONAware {
             
             if (text.indexOf("\\.") != -1) {
                 String propName = text.replaceAll("\\\\\\.","\\.");
+                if (propName.indexOf("\\-") != -1) {
+                    propName = propName.replaceAll("\\\\-","-");
+                }
+
+                if (predicateFlag) {
+                    accept(')');
+                }
                 return new PropertySegement(propName, false);
             }
 
@@ -1011,6 +1342,23 @@ public class JSONPath implements JSONAware {
             }
 
             return segment;
+        }
+
+        Filter filterRest(Filter filter) {
+            boolean and = ch == '&';
+            if ((ch == '&' && getNextChar() == '&') || (ch == '|' && getNextChar() == '|')) {
+                next();
+                next();
+
+                while (ch == ' ') {
+                    next();
+                }
+
+                Filter right = (Filter) parseArrayAccessFilter(false);
+
+                filter = new FilterGroup(filter, right, and);
+            }
+            return filter;
         }
 
         protected long readLongValue() {
@@ -1138,7 +1486,7 @@ public class JSONPath implements JSONAware {
         String readName() {
             skipWhitespace();
 
-            if (ch != '\\' && !IOUtils.firstIdentifier(ch)) {
+            if (ch != '\\' && !Character.isJavaIdentifierStart(ch)) {
                 throw new JSONPathException("illeal jsonpath syntax. " + path);
             }
 
@@ -1148,13 +1496,13 @@ public class JSONPath implements JSONAware {
                     next();
                     buf.append(ch);
                     if (isEOF()) {
-                        break;
+                        return buf.toString();
                     }
                     next();
                     continue;
                 }
 
-                boolean identifierFlag = IOUtils.isIdent(ch);
+                boolean identifierFlag = Character.isJavaIdentifierPart(ch);
                 if (!identifierFlag) {
                     break;
                 }
@@ -1162,13 +1510,11 @@ public class JSONPath implements JSONAware {
                 next();
             }
 
-            if (isEOF() && IOUtils.isIdent(ch)) {
+            if (isEOF() && Character.isJavaIdentifierPart(ch)) {
                 buf.append(ch);
             }
 
-            String propertyName = buf.toString();
-
-            return propertyName;
+            return buf.toString();
         }
 
         String readString() {
@@ -1209,7 +1555,7 @@ public class JSONPath implements JSONAware {
                 if (segment == null) {
                     break;
                 }
-                
+
                 if (level == segements.length) {
                     Segement[] t = new Segement[level * 3 / 2];
                     System.arraycopy(segements, 0, t, 0, level);
@@ -1323,6 +1669,7 @@ public class JSONPath implements JSONAware {
     interface Segement {
 
         Object eval(JSONPath path, Object rootObject, Object currentObject);
+        void extract(JSONPath path, DefaultJSONParser parser, Context context);
     }
 
 
@@ -1332,6 +1679,23 @@ public class JSONPath implements JSONAware {
 
         public Integer eval(JSONPath path, Object rootObject, Object currentObject) {
             return path.evalSize(currentObject);
+        }
+
+        public void extract(JSONPath path, DefaultJSONParser parser, Context context) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    static class KeySetSegement implements Segement {
+
+        public final static KeySetSegement instance = new KeySetSegement();
+
+        public Object eval(JSONPath path, Object rootObject, Object currentObject) {
+            return path.evalKeySet(currentObject);
+        }
+
+        public void extract(JSONPath path, DefaultJSONParser parser, Context context) {
+            throw new UnsupportedOperationException();
         }
     }
 
@@ -1355,6 +1719,112 @@ public class JSONPath implements JSONAware {
             } else {
                 // return path.getPropertyValue(currentObject, propertyName, true);
                 return path.getPropertyValue(currentObject, propertyName, propertyNameHash);
+            }
+        }
+
+        public void extract(JSONPath path, DefaultJSONParser parser, Context context) {
+            JSONLexerBase lexer = (JSONLexerBase) parser.lexer;
+
+            if (deep && context.object == null) {
+                context.object = new JSONArray();
+            }
+
+            if (lexer.token() == JSONToken.LBRACKET) {
+                if ("*".equals(propertyName)) {
+                    return;
+                }
+
+                lexer.nextToken();
+                JSONArray array;
+
+                if (deep) {
+                    array =(JSONArray) context.object;
+                } else {
+                    array = new JSONArray();
+                }
+                for (;;) {
+                    if (lexer.token() == JSONToken.LBRACE) {
+                        int matchStat = lexer.seekObjectToField(propertyNameHash, deep);
+                        if (matchStat == JSONLexer.VALUE) {
+                            Object value;
+                            switch (lexer.token()) {
+                                case JSONToken.LITERAL_INT:
+                                    value = lexer.integerValue();
+                                    lexer.nextToken();
+                                    break;
+                                case JSONToken.LITERAL_STRING:
+                                    value = lexer.stringVal();
+                                    lexer.nextToken();
+                                    break;
+                                default:
+                                    value = parser.parse();
+                                    break;
+                            }
+
+                            array.add(value);
+                            if (lexer.token() == JSONToken.RBRACE) {
+                                lexer.nextToken();
+                                continue;
+                            } else {
+                                lexer.skipObject();
+                            }
+                        } else {
+                            if (deep) {
+                                throw new UnsupportedOperationException();
+                            } else {
+                                lexer.skipObject();
+                            }
+                        }
+                    }
+
+                    if (lexer.token() == JSONToken.RBRACKET) {
+                        break;
+                    } else if (lexer.token() == JSONToken.COMMA) {
+                        lexer.nextToken();
+                        continue;
+                    } else {
+                        throw new JSONException("illegal json.");
+                    }
+                }
+
+                if (!deep) {
+                    context.object = array;
+                }
+                return;
+            }
+
+            int matchStat = lexer.seekObjectToField(propertyNameHash, deep);
+            if (matchStat == JSONLexer.VALUE) {
+                if (context.eval) {
+                    Object value;
+                    switch (lexer.token()) {
+                        case JSONToken.LITERAL_INT:
+                            value = lexer.integerValue();
+                            lexer.nextToken(JSONToken.COMMA);
+                            break;
+                        case JSONToken.LITERAL_FLOAT:
+                            value = lexer.decimalValue();
+                            lexer.nextToken(JSONToken.COMMA);
+                            break;
+                        case JSONToken.LITERAL_STRING:
+                            value = lexer.stringVal();
+                            lexer.nextToken(JSONToken.COMMA);
+                            break;
+                        default:
+                            value = parser.parse();
+                            break;
+                    }
+
+                    if (context.eval) {
+                        context.object = value;
+                    }
+                }
+            } else {
+                if (deep) {
+                    if (matchStat == JSONLexer.OBJECT || matchStat == JSONLexer.ARRAY) {
+                        extract(path, parser, context);
+                    }
+                }
             }
         }
 
@@ -1394,6 +1864,105 @@ public class JSONPath implements JSONAware {
 
             return fieldValues;
         }
+
+        public void extract(JSONPath path, DefaultJSONParser parser, Context context) {
+            JSONLexerBase lexer = (JSONLexerBase) parser.lexer;
+
+            JSONArray array;
+            if (context.object == null) {
+                context.object = array = new JSONArray();
+            } else {
+                array = (JSONArray) context.object;
+            }
+            for (int i = array.size(); i < propertyNamesHash.length; ++i) {
+                array.add(null);
+            }
+
+//            if (lexer.token() == JSONToken.LBRACKET) {
+//                lexer.nextToken();
+//                JSONArray array;
+//
+//                array = new JSONArray();
+//                for (;;) {
+//                    if (lexer.token() == JSONToken.LBRACE) {
+//                        int index = lexer.seekObjectToField(propertyNamesHash);
+//                        int matchStat = lexer.matchStat;
+//                        if (matchStat == JSONLexer.VALUE) {
+//                            Object value;
+//                            switch (lexer.token()) {
+//                                case JSONToken.LITERAL_INT:
+//                                    value = lexer.integerValue();
+//                                    lexer.nextToken();
+//                                    break;
+//                                case JSONToken.LITERAL_STRING:
+//                                    value = lexer.stringVal();
+//                                    lexer.nextToken();
+//                                    break;
+//                                default:
+//                                    value = parser.parse();
+//                                    break;
+//                            }
+//
+//                            array.add(index, value);
+//                            if (lexer.token() == JSONToken.RBRACE) {
+//                                lexer.nextToken();
+//                                continue;
+//                            } else {
+//                                lexer.skipObject();
+//                            }
+//                        } else {
+//                            lexer.skipObject();
+//                        }
+//                    }
+//
+//                    if (lexer.token() == JSONToken.RBRACKET) {
+//                        break;
+//                    } else if (lexer.token() == JSONToken.COMMA) {
+//                        lexer.nextToken();
+//                        continue;
+//                    } else {
+//                        throw new JSONException("illegal json.");
+//                    }
+//                }
+//
+//                context.object = array;
+//                return;
+//            }
+
+            for_:
+            for (;;) {
+                int index = lexer.seekObjectToField(propertyNamesHash);
+                int matchStat = lexer.matchStat;
+                if (matchStat == JSONLexer.VALUE) {
+                    Object value;
+                    switch (lexer.token()) {
+                        case JSONToken.LITERAL_INT:
+                            value = lexer.integerValue();
+                            lexer.nextToken(JSONToken.COMMA);
+                            break;
+                        case JSONToken.LITERAL_FLOAT:
+                            value = lexer.decimalValue();
+                            lexer.nextToken(JSONToken.COMMA);
+                            break;
+                        case JSONToken.LITERAL_STRING:
+                            value = lexer.stringVal();
+                            lexer.nextToken(JSONToken.COMMA);
+                            break;
+                        default:
+                            value = parser.parse();
+                            break;
+                    }
+
+                    array.set(index, value);
+
+                    if (lexer.token() == JSONToken.COMMA) {
+                        continue for_;
+                    }
+                }
+
+                break;
+            }
+        }
     }
 
     static class WildCardSegement implements Segement {
@@ -1404,6 +1973,25 @@ public class JSONPath implements JSONAware {
             return path.getPropertyValues(currentObject);
         }
 
+        public void extract(JSONPath path, DefaultJSONParser parser, Context context) {
+            if (context.eval) {
+                Object object = parser.parse();
+                if (object instanceof JSONObject) {
+                    Collection<Object> values = ((JSONObject) object).values();
+                    JSONArray array = new JSONArray(values.size());
+                    for (Object value : values) {
+                        array.add(value);
+                    }
+                    context.object = array;
+                    return;
+                } else if (object instanceof JSONArray) {
+                    context.object = object;
+                    return;
+                }
+            }
+
+            throw new JSONException("TODO");
+        }
     }
 
     static class ArrayAccessSegement implements Segement {
@@ -1425,6 +2013,15 @@ public class JSONPath implements JSONAware {
         public boolean remove(JSONPath path, Object currentObject) {
             return path.removeArrayItem(path, currentObject, index);
         }
+
+        public void extract(JSONPath path, DefaultJSONParser parser, Context context) {
+            JSONLexerBase lexer = (JSONLexerBase) parser.lexer;
+            if (lexer.seekArrayToItem(index)
+                    && context.eval)
+            {
+                context.object = parser.parse();
+            }
+        }
     }
 
     static class MultiIndexSegement implements Segement {
@@ -1436,12 +2033,35 @@ public class JSONPath implements JSONAware {
         }
 
         public Object eval(JSONPath path, Object rootObject, Object currentObject) {
-            List<Object> items = new ArrayList<Object>(indexes.length);
+            List<Object> items = new JSONArray(indexes.length);
             for (int i = 0; i < indexes.length; ++i) {
                 Object item = path.getArrayItem(currentObject, indexes[i]);
                 items.add(item);
             }
             return items;
+        }
+
+        public void extract(JSONPath path, DefaultJSONParser parser, Context context) {
+            if (context.eval) {
+                Object object = parser.parse();
+                if (object instanceof List) {
+                    int[] indexes = new int[this.indexes.length];
+                    System.arraycopy(this.indexes, 0, indexes, 0, indexes.length);
+                    boolean noneNegative = indexes[0] >= 0;
+
+                    List list = (List) object;
+                    if (noneNegative) {
+                        for (int i = list.size() - 1; i >= 0; i--) {
+                            if (Arrays.binarySearch(indexes, i) < 0) {
+                                list.remove(i);
+                            }
+                        }
+                        context.object = list;
+                        return;
+                    }
+                }
+            }
+            throw new UnsupportedOperationException();
         }
     }
 
@@ -1473,6 +2093,10 @@ public class JSONPath implements JSONAware {
                 items.add(item);
             }
             return items;
+        }
+
+        public void extract(JSONPath path, DefaultJSONParser parser, Context context) {
+            throw new UnsupportedOperationException();
         }
     }
 
@@ -1560,7 +2184,7 @@ public class JSONPath implements JSONAware {
             }
 
             if (propertyValue instanceof Number) {
-                long longPropertyValue = ((Number) propertyValue).longValue();
+                long longPropertyValue = TypeUtils.longExtractValue((Number) propertyValue);
                 for (long value : values) {
                     if (value == longPropertyValue) {
                         return !not;
@@ -1596,7 +2220,7 @@ public class JSONPath implements JSONAware {
             }
 
             if (propertyValue instanceof Number) {
-                long longPropertyValue = ((Number) propertyValue).longValue();
+                long longPropertyValue = TypeUtils.longExtractValue((Number) propertyValue);
                 if (longPropertyValue >= startValue && longPropertyValue <= endValue) {
                     return !not;
                 }
@@ -1634,7 +2258,7 @@ public class JSONPath implements JSONAware {
             }
 
             if (propertyValue instanceof Number) {
-                long longPropertyValue = ((Number) propertyValue).longValue();
+                long longPropertyValue = TypeUtils.longExtractValue((Number) propertyValue);
                 for (Long value : values) {
                     if (value == null) {
                         continue;
@@ -1686,6 +2310,10 @@ public class JSONPath implements JSONAware {
         private final long     value;
         private final Operator op;
 
+        private BigDecimal     valueDecimal;
+        private Float          valueFloat;
+        private Double         valueDouble;
+
         public IntOpSegement(String propertyName, long value, Operator op){
             this.propertyName = propertyName;
             this.propertyNameHash = TypeUtils.fnv1a_64(propertyName);
@@ -1704,20 +2332,93 @@ public class JSONPath implements JSONAware {
                 return false;
             }
 
-            long longValue = ((Number) propertyValue).longValue();
+            if (propertyValue instanceof BigDecimal) {
+                if (valueDecimal == null) {
+                    valueDecimal = BigDecimal.valueOf(value);
+                }
 
-            if (op == Operator.EQ) {
-                return longValue == value;
-            } else if (op == Operator.NE) {
-                return longValue != value;
-            } else if (op == Operator.GE) {
-                return longValue >= value;
-            } else if (op == Operator.GT) {
-                return longValue > value;
-            } else if (op == Operator.LE) {
-                return longValue <= value;
-            } else if (op == Operator.LT) {
-                return longValue < value;
+                int result = valueDecimal.compareTo((BigDecimal) propertyValue);
+                switch (op) {
+                    case EQ:
+                        return result == 0;
+                    case NE:
+                        return result != 0;
+                    case GE:
+                        return 0 >= result;
+                    case GT:
+                        return 0 > result;
+                    case LE:
+                        return 0 <= result;
+                    case LT:
+                        return 0 < result;
+                }
+
+                return false;
+            }
+
+            if (propertyValue instanceof Float) {
+                if (valueFloat == null) {
+                    valueFloat = Float.valueOf(value);
+                }
+
+                int result = valueFloat.compareTo((Float) propertyValue);
+                switch (op) {
+                    case EQ:
+                        return result == 0;
+                    case NE:
+                        return result != 0;
+                    case GE:
+                        return 0 >= result;
+                    case GT:
+                        return 0 > result;
+                    case LE:
+                        return 0 <= result;
+                    case LT:
+                        return 0 < result;
+                }
+
+                return false;
+            }
+
+            if (propertyValue instanceof Double) {
+                if (valueDouble == null) {
+                    valueDouble = Double.valueOf(value);
+                }
+
+                int result = valueDouble.compareTo((Double) propertyValue);
+                switch (op) {
+                    case EQ:
+                        return result == 0;
+                    case NE:
+                        return result != 0;
+                    case GE:
+                        return 0 >= result;
+                    case GT:
+                        return 0 > result;
+                    case LE:
+                        return 0 <= result;
+                    case LT:
+                        return 0 < result;
+                }
+
+                return false;
+            }
+
+            long longValue = TypeUtils.longExtractValue((Number) propertyValue);
+
+            switch (op) {
+                case EQ:
+                    return longValue == value;
+                case NE:
+                    return longValue != value;
+                case GE:
+                    return longValue >= value;
+                case GT:
+                    return longValue > value;
+                case LE:
+                    return longValue <= value;
+                case LT:
+                    return longValue < value;
             }
 
             return false;
@@ -1752,18 +2453,19 @@ public class JSONPath implements JSONAware {
 
             double doubleValue = ((Number) propertyValue).doubleValue();
 
-            if (op == Operator.EQ) {
-                return doubleValue == value;
-            } else if (op == Operator.NE) {
-                return doubleValue != value;
-            } else if (op == Operator.GE) {
-                return doubleValue >= value;
-            } else if (op == Operator.GT) {
-                return doubleValue > value;
-            } else if (op == Operator.LE) {
-                return doubleValue <= value;
-            } else if (op == Operator.LT) {
-                return doubleValue < value;
+            switch (op) {
+                case EQ:
+                    return doubleValue == value;
+                case NE:
+                    return doubleValue != value;
+                case GE:
+                    return doubleValue >= value;
+                case GT:
+                    return doubleValue > value;
+                case LE:
+                    return doubleValue <= value;
+                case LT:
+                    return doubleValue < value;
             }
 
             return false;
@@ -1780,8 +2482,13 @@ public class JSONPath implements JSONAware {
         private final int      minLength;
         private final boolean  not;
 
-        public MatchSegement(String propertyName, String startsWithValue, String endsWithValue, String[] containsValues,
-                             boolean not){
+        public MatchSegement(
+                String propertyName,
+                String startsWithValue,
+                String endsWithValue,
+                String[] containsValues,
+                boolean not)
+        {
             this.propertyName = propertyName;
             this.propertyNameHash = TypeUtils.fnv1a_64(propertyName);
             this.startsWithValue = startsWithValue;
@@ -1924,7 +2631,7 @@ public class JSONPath implements JSONAware {
     }
 
     enum Operator {
-                   EQ, NE, GT, GE, LT, LE, LIKE, NOT_LIKE, RLIKE, NOT_RLIKE, IN, NOT_IN, BETWEEN, NOT_BETWEEN
+                   EQ, NE, GT, GE, LT, LE, LIKE, NOT_LIKE, RLIKE, NOT_RLIKE, IN, NOT_IN, BETWEEN, NOT_BETWEEN, And, Or
     }
 
     static public class FilterSegement implements Segement {
@@ -1963,11 +2670,45 @@ public class JSONPath implements JSONAware {
 
             return null;
         }
+
+        public void extract(JSONPath path, DefaultJSONParser parser, Context context) {
+            throw new UnsupportedOperationException();
+        }
     }
 
     interface Filter {
 
         boolean apply(JSONPath path, Object rootObject, Object currentObject, Object item);
+    }
+
+    static class FilterGroup implements Filter {
+        private boolean and;
+        private List<Filter> fitlers;
+
+        public FilterGroup(Filter left, Filter right, boolean and) {
+            fitlers = new ArrayList<Filter>(2);
+            fitlers.add(left);
+            fitlers.add(right);
+            this.and = and;
+        }
+
+        public boolean apply(JSONPath path, Object rootObject, Object currentObject, Object item) {
+            if (and) {
+                for (Filter fitler : this.fitlers) {
+                    if (!fitler.apply(path, rootObject, currentObject, item)) {
+                        return false;
+                    }
+                }
+                return true;
+            } else {
+                for (Filter fitler : this.fitlers) {
+                    if (fitler.apply(path, rootObject, currentObject, item)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
     }
 
     @SuppressWarnings("rawtypes")
@@ -2147,7 +2888,7 @@ public class JSONPath implements JSONAware {
             BigDecimal decimalA = (BigDecimal) a;
             
             if (isIntB) {
-                return decimalA.equals(BigDecimal.valueOf(b.longValue()));
+                return decimalA.equals(BigDecimal.valueOf(TypeUtils.longExtractValue(b)));
             }
         }
 
@@ -2167,7 +2908,7 @@ public class JSONPath implements JSONAware {
         if (isIntB) {
             if (a instanceof BigInteger) {
                 BigInteger bigIntA = (BigInteger) a;
-                BigInteger bigIntB = BigInteger.valueOf(b.longValue());
+                BigInteger bigIntB = BigInteger.valueOf(TypeUtils.longExtractValue(b));
                 
                 return bigIntA.equals(bigIntB);
             }
@@ -2194,6 +2935,7 @@ public class JSONPath implements JSONAware {
     }
 
     final static long SIZE = 0x4dea9618e618ae3cL; // TypeUtils.fnv1a_64("size");
+    final static long LENGTH = 0xea11573f1af59eb5L; // TypeUtils.fnv1a_64("length");
 
     protected Object getPropertyValue(Object currentObject, String propertyName, long propertyNameHash) {
         if (currentObject == null) {
@@ -2204,7 +2946,7 @@ public class JSONPath implements JSONAware {
             Map map = (Map) currentObject;
             Object val = map.get(propertyName);
 
-            if (val == null && SIZE == propertyNameHash) {
+            if (val == null && (SIZE == propertyNameHash || LENGTH == propertyNameHash)) {
                 val = map.size();
             }
 
@@ -2225,7 +2967,7 @@ public class JSONPath implements JSONAware {
         if (currentObject instanceof List) {
             List list = (List) currentObject;
 
-            if (SIZE == propertyNameHash) {
+            if (SIZE == propertyNameHash || LENGTH == propertyNameHash) {
                 return list.size();
             }
 
@@ -2233,6 +2975,43 @@ public class JSONPath implements JSONAware {
 
             for (int i = 0; i < list.size(); ++i) {
                 Object obj = list.get(i);
+
+                //
+                if (obj == list) {
+                    fieldValues.add(obj);
+                    continue;
+                }
+
+                Object itemValue = getPropertyValue(obj, propertyName, propertyNameHash);
+                if (itemValue instanceof Collection) {
+                    Collection collection = (Collection) itemValue;
+                    fieldValues.addAll(collection);
+                } else if (itemValue != null) {
+                    fieldValues.add(itemValue);
+                }
+            }
+
+            return fieldValues;
+        }
+
+        if (currentObject instanceof Object[]) {
+            Object[] array = (Object[]) currentObject;
+
+            if (SIZE == propertyNameHash || LENGTH == propertyNameHash) {
+                return array.length;
+            }
+
+            List<Object> fieldValues = new JSONArray(array.length);
+
+            for (int i = 0; i < array.length; ++i) {
+                Object obj = array[i];
+
+                //
+                if (obj == array) {
+                    fieldValues.add(obj);
+                    continue;
+                }
+
                 Object itemValue = getPropertyValue(obj, propertyName, propertyNameHash);
                 if (itemValue instanceof Collection) {
                     Collection collection = (Collection) itemValue;
@@ -2529,6 +3308,34 @@ public class JSONPath implements JSONAware {
             return beanSerializer.getSize(currentObject);
         } catch (Exception e) {
             throw new JSONPathException("evalSize error : " + path, e);
+        }
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    Set<?> evalKeySet(Object currentObject) {
+        if (currentObject == null) {
+            return null;
+        }
+
+        if (currentObject instanceof Map) {
+            // For performance reasons return keySet directly, without filtering null-value key.
+            return ((Map)currentObject).keySet();
+        }
+
+        if (currentObject instanceof Collection || currentObject instanceof Object[]
+            || currentObject.getClass().isArray()) {
+            return null;
+        }
+
+        JavaBeanSerializer beanSerializer = getJavaBeanSerializer(currentObject.getClass());
+        if (beanSerializer == null) {
+            return null;
+        }
+
+        try {
+            return beanSerializer.getFieldNames(currentObject);
+        } catch (Exception e) {
+            throw new JSONPathException("evalKeySet error : " + path, e);
         }
     }
 

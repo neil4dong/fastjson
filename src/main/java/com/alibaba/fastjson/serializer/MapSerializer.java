@@ -1,5 +1,5 @@
 /*
- * Copyright 1999-2017 Alibaba Group.
+ * Copyright 1999-2018 Alibaba Group.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -61,6 +61,10 @@ public class MapSerializer extends SerializeFilterable implements ObjectSerializ
         Map<?, ?> map = (Map<?, ?>) object;
         final int mapSortFieldMask = SerializerFeature.MapSortField.mask;
         if ((out.features & mapSortFieldMask) != 0 || (features & mapSortFieldMask) != 0) {
+            if (map instanceof JSONObject) {
+                map = ((JSONObject) map).getInnerMap();
+            }
+
             if ((!(map instanceof SortedMap)) && !(map instanceof LinkedHashMap)) {
                 try {
                     map = new TreeMap(map);
@@ -204,7 +208,7 @@ public class MapSerializer extends SerializeFilterable implements ObjectSerializ
                 }
 
                 if (value == null) {
-                    if (!out.isEnabled(SerializerFeature.WRITE_MAP_NULL_FEATURES)) {
+                    if (!out.isEnabled(SerializerFeature.WriteMapNullValue)) {
                         continue;
                     }
                 }

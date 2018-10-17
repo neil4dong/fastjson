@@ -1,5 +1,5 @@
 /*
- * Copyright 1999-2017 Alibaba Group.
+ * Copyright 1999-2018 Alibaba Group.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,6 +50,7 @@ public class FieldSerializer implements Comparable<FieldSerializer> {
     protected boolean             serializeUsing          = false;
 
     protected boolean             persistenceXToMany      = false; // OneToMany or ManyToMany
+    protected boolean             browserCompatible;
 
     private RuntimeSerializerInfo runtimeInfo;
     
@@ -57,16 +58,18 @@ public class FieldSerializer implements Comparable<FieldSerializer> {
         this.fieldInfo = fieldInfo;
         this.fieldContext = new BeanContext(beanType, fieldInfo);
 
-        if (beanType != null && fieldInfo.isEnum) {
+        if (beanType != null && (fieldInfo.isEnum || fieldInfo.fieldClass == long.class || fieldInfo.fieldClass == Long.class)) {
             JSONType jsonType = TypeUtils.getAnnotation(beanType,JSONType.class);
             if (jsonType != null) {
                 for (SerializerFeature feature : jsonType.serialzeFeatures()) {
                     if (feature == SerializerFeature.WriteEnumUsingToString) {
                         writeEnumUsingToString = true;
-                    }else if(feature == SerializerFeature.WriteEnumUsingName){
+                    } else if(feature == SerializerFeature.WriteEnumUsingName){
                         writeEnumUsingName = true;
-                    }else if(feature == SerializerFeature.DisableCircularReferenceDetect){
+                    } else if(feature == SerializerFeature.DisableCircularReferenceDetect){
                         disableCircularReferenceDetect = true;
+                    } else if(feature == SerializerFeature.BrowserCompatible){
+                        browserCompatible = true;
                     }
                 }
             }
@@ -95,10 +98,12 @@ public class FieldSerializer implements Comparable<FieldSerializer> {
             for (SerializerFeature feature : annotation.serialzeFeatures()) {
                 if (feature == SerializerFeature.WriteEnumUsingToString) {
                     writeEnumUsingToString = true;
-                }else if(feature == SerializerFeature.WriteEnumUsingName){
+                } else if(feature == SerializerFeature.WriteEnumUsingName){
                     writeEnumUsingName = true;
-                }else if(feature == SerializerFeature.DisableCircularReferenceDetect){
+                } else if(feature == SerializerFeature.DisableCircularReferenceDetect){
                     disableCircularReferenceDetect = true;
+                } else if(feature == SerializerFeature.BrowserCompatible){
+                    browserCompatible = true;
                 }
             }
             
@@ -143,7 +148,7 @@ public class FieldSerializer implements Comparable<FieldSerializer> {
         Object propertyValue =  fieldInfo.get(object);
         if (format != null && propertyValue != null) {
             if (fieldInfo.fieldClass == Date.class) {
-                SimpleDateFormat dateFormat = new SimpleDateFormat(format);
+                SimpleDateFormat dateFormat = new SimpleDateFormat(format, JSON.defaultLocale);
                 dateFormat.setTimeZone(JSON.defaultTimeZone);
                 return dateFormat.format(propertyValue);
             }
@@ -162,6 +167,21 @@ public class FieldSerializer implements Comparable<FieldSerializer> {
             Class<?> runtimeFieldClass;
             if (propertyValue == null) {
                 runtimeFieldClass = this.fieldInfo.fieldClass;
+                if (runtimeFieldClass == byte.class) {
+                    runtimeFieldClass = Byte.class;
+                } else if (runtimeFieldClass == short.class) {
+                    runtimeFieldClass = Short.class;
+                } else if (runtimeFieldClass == int.class) {
+                    runtimeFieldClass = Integer.class;
+                } else if (runtimeFieldClass == long.class) {
+                    runtimeFieldClass = Long.class;
+                } else if (runtimeFieldClass == float.class) {
+                    runtimeFieldClass = Float.class;
+                } else if (runtimeFieldClass == double.class) {
+                    runtimeFieldClass = Double.class;
+                } else if (runtimeFieldClass == boolean.class) {
+                    runtimeFieldClass = Boolean.class;
+                }
             } else {
                 runtimeFieldClass = propertyValue.getClass();
             }
@@ -279,6 +299,15 @@ public class FieldSerializer implements Comparable<FieldSerializer> {
                 && JavaBeanSerializer.class.isInstance(valueSerializer)) {
             ((JavaBeanSerializer) valueSerializer).write(serializer, propertyValue, fieldInfo.name, fieldInfo.fieldType, fieldFeatures, false);
             return;
+        }
+
+        if (browserCompatible && propertyValue != null
+                && (fieldInfo.fieldClass == long.class || fieldInfo.fieldClass == Long.class)) {
+            long value = (Long) propertyValue;
+            if (value > 9007199254740991L || value < -9007199254740991L) {
+                serializer.getWriter().writeString(Long.toString(value));
+                return;
+            }
         }
 
         valueSerializer.write(serializer, propertyValue, fieldInfo.name, fieldInfo.fieldType, fieldFeatures);

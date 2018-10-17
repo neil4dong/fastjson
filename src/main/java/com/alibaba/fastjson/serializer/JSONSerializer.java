@@ -1,5 +1,5 @@
 /*
- * Copyright 1999-2017 Alibaba Group.
+ * Copyright 1999-2018 Alibaba Group.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,10 +21,7 @@ import java.io.Writer;
 import java.lang.reflect.Type;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.IdentityHashMap;
-import java.util.Locale;
-import java.util.TimeZone;
+import java.util.*;
 import java.util.zip.GZIPOutputStream;
 
 import com.alibaba.fastjson.JSON;
@@ -186,7 +183,8 @@ public class JSONSerializer extends SerializeFilterable {
             out.write("{\"$ref\":\"$\"}");
         } else {
             out.write("{\"$ref\":\"");
-            out.write(references.get(object).toString());
+            String path = references.get(object).toString();
+            out.write(path);
             out.write("\"}");
         }
     }
@@ -202,6 +200,11 @@ public class JSONSerializer extends SerializeFilterable {
     public boolean hasNameFilters(SerializeFilterable filterable) {
         return (nameFilters != null && nameFilters.size() > 0) //
                || (filterable.nameFilters != null && filterable.nameFilters.size() > 0);
+    }
+
+    public boolean hasPropertyFilters(SerializeFilterable filterable) {
+        return (propertyFilters != null && propertyFilters.size() > 0) //
+                || (filterable.propertyFilters != null && filterable.propertyFilters.size() > 0);
     }
 
     public int getIndentCount() {
@@ -346,6 +349,21 @@ public class JSONSerializer extends SerializeFilterable {
             } else {
                 out.writeByteArray(bytes);
             }
+            return;
+        }
+
+        if (object instanceof Collection) {
+            Collection collection = (Collection) object;
+            Iterator iterator = collection.iterator();
+            out.write('[');
+            for (int i = 0; i < collection.size(); i++) {
+                Object item = iterator.next();
+                if (i != 0) {
+                    out.write(',');
+                }
+                writeWithFormat(item, format);
+            }
+            out.write(']');
             return;
         }
         write(object);

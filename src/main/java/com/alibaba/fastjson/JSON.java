@@ -72,15 +72,11 @@ import sun.reflect.annotation.AnnotationType;
 public abstract class JSON implements JSONStreamAware, JSONAware {
     public static TimeZone         defaultTimeZone      = TimeZone.getDefault();
     public static Locale           defaultLocale        = Locale.getDefault();
-
     public static String           DEFAULT_TYPE_KEY     = "@type";
-
     static final SerializeFilter[] emptyFilters         = new SerializeFilter[0];
-
     public static String           DEFFAULT_DATE_FORMAT = "yyyy-MM-dd HH:mm:ss";
-    //public static String           DEFFAULT_LOCAL_DATE_TIME_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSSSSS";
-
     public static int              DEFAULT_PARSER_FEATURE;
+    public static int              DEFAULT_GENERATE_FEATURE;
     static {
         int features = 0;
         features |= Feature.AutoCloseSource.getMask();
@@ -94,7 +90,6 @@ public abstract class JSON implements JSONStreamAware, JSONAware {
         DEFAULT_PARSER_FEATURE = features;
     }
 
-    public static int DEFAULT_GENERATE_FEATURE;
     static {
         int features = 0;
         features |= SerializerFeature.QuoteFieldNames.getMask();
@@ -113,6 +108,14 @@ public abstract class JSON implements JSONStreamAware, JSONAware {
         }
 
         DEFAULT_GENERATE_FEATURE = features;
+    }
+
+    static {
+        {
+            if ("true".equals(IOUtils.DEFAULT_PROPERTIES.getProperty("parser.features.NonStringKeyAsString"))) {
+                DEFAULT_PARSER_FEATURE |= Feature.NonStringKeyAsString.getMask();
+            }
+        }
     }
 
     /**
@@ -614,6 +617,10 @@ public abstract class JSON implements JSONStreamAware, JSONAware {
     public static byte[] toJSONBytes(Object object, SerializerFeature... features) {
         return toJSONBytes(object, DEFAULT_GENERATE_FEATURE, features);
     }
+
+    public static byte[] toJSONBytes(Object object, SerializeFilter filter, SerializerFeature... features) {
+        return toJSONBytes(object, SerializeConfig.globalInstance, new SerializeFilter[] {filter}, DEFAULT_GENERATE_FEATURE, features);
+    }
     
     /**
      * @since 1.2.11 
@@ -681,18 +688,46 @@ public abstract class JSON implements JSONStreamAware, JSONAware {
         return toJSONString(object, mapping, emptyFilters, null, 0, features);
     }
 
+    /**
+     * @since 1.2.42
+     */
     public static byte[] toJSONBytes(Object object, SerializeConfig config, SerializerFeature... features) {
-        return toJSONBytes(object, config, DEFAULT_GENERATE_FEATURE, features);
+        return toJSONBytes(object, config, emptyFilters, DEFAULT_GENERATE_FEATURE, features);
+    }
+
+    /**
+     * @since 1.2.11
+     */
+    public static byte[] toJSONBytes(Object object, SerializeConfig config, int defaultFeatures, SerializerFeature... features) {
+        return toJSONBytes(object, config, emptyFilters, defaultFeatures, features);
+    }
+
+    /**
+     * @since 1.2.42
+     */
+    public static byte[] toJSONBytes(Object object, SerializeFilter[] filters, SerializerFeature... features) {
+        return toJSONBytes(object, SerializeConfig.globalInstance, filters, DEFAULT_GENERATE_FEATURE, features);
+    }
+
+    public static byte[] toJSONBytes(Object object, SerializeConfig config, SerializeFilter filter, SerializerFeature... features) {
+        return toJSONBytes(object, config, new SerializeFilter[] {filter}, DEFAULT_GENERATE_FEATURE, features);
     }
     
     /**
-     * @since 1.2.11 
+     * @since 1.2.42
      */
-    public static byte[] toJSONBytes(Object object, SerializeConfig config, int defaultFeatures, SerializerFeature... features) {
+    public static byte[] toJSONBytes(Object object, SerializeConfig config, SerializeFilter[] filters, int defaultFeatures, SerializerFeature... features) {
         SerializeWriter out = new SerializeWriter(null, defaultFeatures, features);
 
         try {
             JSONSerializer serializer = new JSONSerializer(out, config);
+
+            if (filters != null) {
+                for (SerializeFilter filter : filters) {
+                    serializer.addFilter(filter);
+                }
+            }
+
             serializer.write(object);
             return out.toBytes(IOUtils.UTF8);
         } finally {
@@ -1027,5 +1062,5 @@ public abstract class JSON implements JSONStreamAware, JSONAware {
         parser.handleResovleTask(value);
     }
 
-    public final static String VERSION = "1.2.40";
+    public final static String VERSION = "1.2.51";
 }
